@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>מחיר בדיקה לפני קנייה</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 16px 60px;
+  }
+
+  h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 28px;
+    text-align: center;
+  }
+
+  .search-row {
+    display: flex;
+    gap: 10px;
+    flex-direction: row-reverse;
+    width: 100%;
+    max-width: 420px;
+    margin-bottom: 14px;
+  }
+
+  #plate {
+    flex: 1;
+    padding: 12px 16px;
+    font-size: 1.1rem;
+    border-radius: 8px;
+    border: 1px solid #3a3a5c;
+    background: #16213e;
+    color: #fff;
+    text-align: center;
+    outline: none;
+    direction: ltr;
+  }
+  #plate:focus { border-color: #3b82f6; }
+  #plate::placeholder { color: #666; direction: rtl; }
+
+  #searchBtn {
+    padding: 12px 24px;
+    font-size: 1rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    background: #3b82f6;
+    color: #fff;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+  }
+  #searchBtn:hover:not(:disabled) { background: #2563eb; }
+  #searchBtn:disabled { background: #334155; cursor: default; }
+
+  #status {
+    font-size: 0.95rem;
+    min-height: 22px;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+
+  .warning-box {
+    display: none;
+    width: 100%;
+    max-width: 480px;
+    background: #2a1a00;
+    border: 1px solid #f59e0b;
+    border-radius: 10px;
+    padding: 14px 20px;
+    text-align: center;
+    color: #f59e0b;
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+
+  .result-card {
+    display: none;
+    width: 100%;
+    max-width: 480px;
+    background: #16213e;
+    border: 1px solid #3a3a5c;
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 10px;
+  }
+
+  .price-line {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #4CAF50;
+    text-align: center;
+    margin-bottom: 18px;
+    min-height: 2rem;
+  }
+
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid #2a2a4a;
+    font-size: 1rem;
+  }
+  .detail-row:last-child { border-bottom: none; }
+  .detail-label { color: #94a3b8; }
+  .detail-value { font-weight: 600; color: #e2e8f0; }
+
+  .battery-card {
+    display: none;
+    width: 100%;
+    max-width: 480px;
+    background: #1e2a1e;
+    border: 1px solid #2d5a2d;
+    border-radius: 10px;
+    padding: 14px 20px;
+    text-align: center;
+    color: #6fcf6f;
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+
+  @media (max-width: 500px) {
+    h1 { font-size: 1.5rem; }
+    .result-card { padding: 18px 16px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>מחיר בדיקה לפני קנייה 🚗</h1>
+
+<div class="search-row">
+  <input id="plate" type="text" placeholder="מספר רישוי" maxlength="8" inputmode="numeric">
+  <button id="searchBtn" onclick="doSearch()">חפש</button>
+</div>
+
+<div id="status"></div>
+
+<div class="warning-box" id="warningBox"></div>
+
+<div class="result-card" id="resultCard">
+  <div class="price-line" id="priceLine"></div>
+  <div class="detail-row"><span class="detail-label">קבוצת אגרה</span><span class="detail-value" id="dGroup">—</span></div>
+  <div class="detail-row"><span class="detail-label">סוג הנעה</span><span class="detail-value" id="dDrive">—</span></div>
+  <div class="detail-row"><span class="detail-label">סוג רכב</span><span class="detail-value" id="dType">—</span></div>
+  <div class="detail-row"><span class="detail-label">מרכב</span><span class="detail-value" id="dBody">—</span></div>
+  <div class="detail-row"><span class="detail-label">מקומות ישיבה (למעט נהג)</span><span class="detail-value" id="dSeats">—</span></div>
+</div>
+
+<div class="battery-card" id="batteryCard"></div>
+
+<script>
+const API      = "https://data.gov.il/api/3/action/datastore_search";
+const RES_REG  = "053cea08-09bc-40ec-8f7a-156f0677aff3";
+const RES_WLTP = "142afde2-6228-49f9-8a29-9b6c3a0cbe40";
+
+const DEGEM_LABEL = { P: "פרטי", M: "מסחרי", L: "אופנוע", T: "טרקטור", O: "נגרר" };
+
+async function apiGet(resourceId, filters, limit = 10) {
+  const params = new URLSearchParams({
+    resource_id: resourceId,
+    filters: JSON.stringify(filters),
+    limit,
+  });
+  const res = await fetch(`${API}?${params}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  return (data.result || {}).records || [];
+}
+
+async function fetchVehicle(plate) {
+  const regRecs = await apiGet(RES_REG, { mispar_rechev: plate }, 1);
+  if (!regRecs.length) return { status: "not_found" };
+  const reg = regRecs[0];
+
+  const sug_delek    = reg.sug_delek_nm || "";
+  const sug_degem    = reg.sug_degem    || "";
+  const tozeret_cd   = reg.tozeret_cd;
+  const degem_nm     = reg.degem_nm;
+  const shnat_yitzur = reg.shnat_yitzur;
+  const ramat_gimur  = reg.ramat_gimur;
+
+  if (tozeret_cd && degem_nm) {
+    const candidates = [];
+    if (shnat_yitzur && ramat_gimur)
+      candidates.push({ tozeret_cd, degem_nm, shnat_yitzur, ramat_gimur });
+    if (shnat_yitzur)
+      candidates.push({ tozeret_cd, degem_nm, shnat_yitzur });
+    candidates.push({ tozeret_cd, degem_nm });
+
+    for (const flt of candidates) {
+      const recs = await apiGet(RES_WLTP, flt, 10);
+      if (recs.length) {
+        return { status: "ok", data: { ...recs[0], sug_delek_nm: sug_delek, sug_degem } };
+      }
+    }
+  }
+
+  return { status: "no_wltp", data: { sug_delek_nm: sug_delek, sug_degem } };
+}
+
+function getPrice(group, hanaa, merkav) {
+  if (!group) return null;
+  const g = parseInt(group, 10);
+  if (!g) return null;
+  const is4x4  = hanaa === "4X4";
+  const isMini = merkav && merkav.includes("מיני");
+  if (is4x4)  return g <= 3 ? 860  : g <= 5 ? 1000 : g === 6 ? 1300 : 1500;
+  if (isMini) return g <= 5 ? 860  : 1250;
+  return           g <= 3 ? 600  : g <= 5 ? 690  : g === 6 ? 860  : 1250;
+}
+
+function isCommercial(merkav, sug_degem) {
+  if ((merkav || "").includes("מסחרי")) return true;
+  if ((sug_degem || "").trim().toUpperCase() === "M") return true;
+  return false;
+}
+
+function isPriceCheckWarning(merkav, mispar_moshavim) {
+  const m = (merkav || "").toUpperCase();
+  if (m.includes("MPV") || (merkav || "").includes("אחוד")) return true;
+  const seats = parseInt(mispar_moshavim || "0", 10);
+  if (!isNaN(seats) && seats - 1 >= 6) return true;
+  return false;
+}
+
+function getBattery(sug_delek) {
+  const f = sug_delek || "";
+  if (f.includes("חשמל"))   return { label: "בדיקת סוללה לרכב חשמלי",  price: 450 };
+  if (f.includes("היברידי") || f.includes("היבריד")) return { label: "בדיקת סוללה לרכב היברידי", price: 300 };
+  return null;
+}
+
+function setStatus(msg, color) {
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.style.color = color || "#94a3b8";
+}
+
+function hide(...ids) { ids.forEach(id => { document.getElementById(id).style.display = "none"; }); }
+function show(id, display = "block") { document.getElementById(id).style.display = display; }
+
+async function doSearch() {
+  const plate = document.getElementById("plate").value.trim();
+  if (!plate) { setStatus("נא להכניס מספר רישוי", "orange"); return; }
+  if (!/^\d{5,8}$/.test(plate)) { setStatus("מספר רישוי לא תקין — 5 עד 8 ספרות", "orange"); return; }
+
+  const btn = document.getElementById("searchBtn");
+  btn.disabled = true;
+  btn.textContent = "מחפש...";
+  setStatus("מחפש...", "#94a3b8");
+  hide("warningBox", "resultCard", "batteryCard");
+
+  try {
+    const { status, data } = await fetchVehicle(plate);
+
+    if (status === "not_found") {
+      setStatus("הרכב לא נמצא במאגר", "orange");
+      return;
+    }
+
+    if (status === "no_wltp" || !data) {
+      setStatus("לא ניתן לחשב מחיר — נתוני הרכב אינם זמינים", "orange");
+      showBattery(data?.sug_delek_nm || "");
+      return;
+    }
+
+    const { kvuzat_agra_cd, hanaa_nm, merkav, sug_delek_nm, sug_degem, mispar_moshavim } = data;
+
+    document.getElementById("dGroup").textContent = kvuzat_agra_cd || "—";
+    document.getElementById("dDrive").textContent = hanaa_nm       || "—";
+    document.getElementById("dType").textContent  = DEGEM_LABEL[sug_degem] || sug_degem || "—";
+    document.getElementById("dBody").textContent  = merkav         || "—";
+    const seats = mispar_moshavim ? parseInt(mispar_moshavim, 10) - 1 : null;
+    document.getElementById("dSeats").textContent = seats !== null && !isNaN(seats) ? seats : "—";
+
+    if (isCommercial(merkav, sug_degem)) {
+      document.getElementById("priceLine").textContent = "";
+      document.getElementById("priceLine").style.color = "orange";
+      document.getElementById("warningBox").textContent = "הרכב הינו מסחרי — יש לברר מחיר מדויק";
+      show("warningBox");
+      show("resultCard", "block");
+      setStatus("", "");
+      showBattery(sug_delek_nm);
+      return;
+    }
+
+    const priceCheckWarn = isPriceCheckWarning(merkav, mispar_moshavim);
+    if (priceCheckWarn) {
+      document.getElementById("priceLine").textContent = "";
+      document.getElementById("warningBox").textContent = "יש לברר מחיר מדויק";
+      show("warningBox");
+    } else {
+      const price = getPrice(kvuzat_agra_cd, hanaa_nm, merkav);
+      const priceLine = document.getElementById("priceLine");
+      if (price) {
+        priceLine.textContent = `עלות בדיקה: ₪${price.toLocaleString()}`;
+        priceLine.style.color = "#4CAF50";
+      } else {
+        priceLine.textContent = "לא ניתן לחשב עלות — סוג רכב לא מזוהה";
+        priceLine.style.color = "orange";
+      }
+    }
+
+    setStatus("", "");
+    show("resultCard", "block");
+    showBattery(sug_delek_nm);
+
+  } catch (e) {
+    setStatus("שגיאת תקשורת — בדוק חיבור לאינטרנט", "red");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "חפש";
+  }
+}
+
+function showBattery(sug_delek) {
+  const b = getBattery(sug_delek);
+  const card = document.getElementById("batteryCard");
+  if (b) {
+    card.textContent = `${b.label}:   ₪${b.price.toLocaleString()}`;
+    show("batteryCard");
+  } else {
+    hide("batteryCard");
+  }
+}
+
+document.getElementById("plate").addEventListener("keydown", e => {
+  if (e.key === "Enter") doSearch();
+});
+</script>
+
+</body>
+</html>
