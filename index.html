@@ -226,7 +226,7 @@ function timeoutSignal() {
     : undefined;
 }
 
-async function apiGet(resourceId, filters, limit = 1) {
+async function apiGetFetch(resourceId, filters, limit = 1) {
   const url = apiUrl(resourceId, filters, limit);
 
   let res;
@@ -246,6 +246,63 @@ async function apiGet(resourceId, filters, limit = 1) {
     return (data.result || {}).records || [];
   } catch (e) {
     throw new ParseError(e);
+  }
+}
+
+// CKAN serves any action API GET as JSONP when a callback parameter is present,
+// and a <script> tag is not subject to CORS at all. So when the browser discards
+// a response for a missing Access-Control-Allow-Origin header, this path still
+// gets the data. It carries no status code — the script either runs or it does
+// not — which is why it is a fallback and not the normal route.
+function apiGetJsonp(resourceId, filters, limit = 1) {
+  return new Promise((resolve, reject) => {
+    const cb = `__ckan_cb_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const script = document.createElement("script");
+
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cb];
+      script.remove();
+    }
+    const timer = setTimeout(() => { cleanup(); reject(new TimeoutError()); }, TIMEOUT_MS);
+
+    window[cb] = (data) => {
+      cleanup();
+      resolve(((data || {}).result || {}).records || []);
+    };
+    // Fires when the host refuses the request or answers with something that is
+    // not runnable JavaScript — a block page, for instance.
+    script.onerror = () => { cleanup(); reject(new NetworkError(new Error("JSONP request failed"))); };
+
+    script.src = `${apiUrl(resourceId, filters, limit)}&callback=${encodeURIComponent(cb)}`;
+    document.head.appendChild(script);
+  });
+}
+
+// Set once a fetch has failed the way a CORS block fails and JSONP has covered
+// for it, so the remaining calls in a lookup skip the doomed fetch.
+let corsBlocked = false;
+
+async function apiGet(resourceId, filters, limit = 1) {
+  if (corsBlocked) return apiGetJsonp(resourceId, filters, limit);
+
+  try {
+    return await apiGetFetch(resourceId, filters, limit);
+  } catch (e) {
+    // Anything carrying a status came back from data.gov.il and is real: report
+    // it. Only a fetch rejected with no status can be the CORS case worth
+    // retrying over JSONP.
+    if (!(e instanceof NetworkError)) throw e;
+    try {
+      const records = await apiGetJsonp(resourceId, filters, limit);
+      corsBlocked = true;
+      return records;
+    } catch (jsonpErr) {
+      // Neither transport got data. That is no longer a CORS story — CORS does
+      // not touch a script tag — so mark it and let the caller say so.
+      e.jsonpFailed = true;
+      throw e;
+    }
   }
 }
 
@@ -291,6 +348,15 @@ async function describeFailure(err) {
       return { msg: "אין חיבור לאינטרנט", detail: "navigator.onLine = false" };
     }
     const reachable = await probeReachable();
+    if (reachable && err.jsonpFailed) {
+      // The host answered, but neither a fetch nor a script tag got usable data
+      // out of it. A missing CORS header cannot explain that — a script tag
+      // ignores CORS — so the API itself is refusing or failing.
+      return {
+        msg: "data.gov.il מגיב אך לא מחזיר נתונים — כנראה תקלה או חסימה אצלם",
+        detail: `host reachable, both fetch and JSONP failed — API not serving data (${err.message})`,
+      };
+    }
     if (reachable) {
       return {
         msg: "החיבור תקין, אך הדפדפן חסם את התשובה מ-data.gov.il (CORS)",
