@@ -73,6 +73,19 @@
     margin-bottom: 10px;
   }
 
+  #errorDetail {
+    display: none;
+    width: 100%;
+    max-width: 480px;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: #64748b;
+    text-align: center;
+    margin-bottom: 12px;
+    direction: ltr;
+    word-break: break-word;
+  }
+
   .warning-box {
     display: none;
     width: 100%;
@@ -152,6 +165,8 @@
 
 <div id="status"></div>
 
+<div id="errorDetail"></div>
+
 <div class="warning-box" id="warningBox"></div>
 
 <div class="result-card" id="resultCard">
@@ -170,19 +185,125 @@ const API      = "https://data.gov.il/api/3/action/datastore_search";
 const RES_REG  = "053cea08-09bc-40ec-8f7a-156f0677aff3";
 const RES_WLTP = "142afde2-6228-49f9-8a29-9b6c3a0cbe40";
 
+// A request that never returns is indistinguishable from a hang to the user,
+// so cap every call instead of leaving the button stuck on "מחפש...".
+const TIMEOUT_MS = 15000;
+
 // WLTP sug_degem: M=נוסעים (M-category), N=מסחרי (N-category commercial)
 const DEGEM_LABEL = { M: "נוסעים", N: "מסחרי", L: "אופנוע", T: "טרקטור", O: "נגרר" };
 
-async function apiGet(resourceId, filters, limit = 1) {
+// Three very different problems used to surface as one "communication error":
+// the request never reaching data.gov.il, data.gov.il answering with an error
+// status, and data.gov.il answering with something that is not JSON (a block
+// or challenge page). They are separated here so the UI can name the real one.
+class NetworkError extends Error {
+  constructor(cause) { super(String(cause && cause.message || cause)); this.name = "NetworkError"; this.cause = cause; }
+}
+class TimeoutError extends Error {
+  constructor() { super(`timeout after ${TIMEOUT_MS}ms`); this.name = "TimeoutError"; }
+}
+class HttpError extends Error {
+  constructor(status) { super(`HTTP ${status}`); this.name = "HttpError"; this.status = status; }
+}
+class ParseError extends Error {
+  constructor(cause) { super(String(cause && cause.message || cause)); this.name = "ParseError"; this.cause = cause; }
+}
+
+function apiUrl(resourceId, filters, limit) {
   const params = new URLSearchParams({
     resource_id: resourceId,
     filters: JSON.stringify(filters),
     limit,
   });
-  const res = await fetch(`${API}?${params}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return (data.result || {}).records || [];
+  return `${API}?${params}`;
+}
+
+// AbortSignal.timeout is unavailable on older browsers; there the request
+// simply runs uncapped rather than throwing while building the options.
+function timeoutSignal() {
+  return (typeof AbortSignal !== "undefined" && AbortSignal.timeout)
+    ? AbortSignal.timeout(TIMEOUT_MS)
+    : undefined;
+}
+
+async function apiGet(resourceId, filters, limit = 1) {
+  const url = apiUrl(resourceId, filters, limit);
+
+  let res;
+  try {
+    res = await fetch(url, { signal: timeoutSignal() });
+  } catch (e) {
+    // A cross-origin block and an unreachable host both land here as the same
+    // opaque TypeError — the browser withholds the reason from the page.
+    if (e && (e.name === "TimeoutError" || e.name === "AbortError")) throw new TimeoutError();
+    throw new NetworkError(e);
+  }
+
+  if (!res.ok) throw new HttpError(res.status);
+
+  try {
+    const data = await res.json();
+    return (data.result || {}).records || [];
+  } catch (e) {
+    throw new ParseError(e);
+  }
+}
+
+// The browser refuses to tell a page why a cross-origin fetch failed, so probe
+// the host with mode:"no-cors": that resolves (opaquely) whenever the request
+// actually reached data.gov.il, and rejects when nothing got through. A resolved
+// probe therefore means the connection is fine and the request itself is being
+// rejected — by CORS on the browser side or by a block on the server side.
+async function probeReachable() {
+  try {
+    await fetch(apiUrl(RES_REG, {}, 1), { mode: "no-cors", signal: timeoutSignal() });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Turns a failure into the message the user sees plus the technical line under
+// it, so a report says what actually broke instead of "communication error".
+async function describeFailure(err) {
+  if (err instanceof TimeoutError) {
+    return { msg: "data.gov.il לא הגיב בזמן — נסה שוב", detail: `timeout ${TIMEOUT_MS}ms` };
+  }
+
+  if (err instanceof HttpError) {
+    const s = err.status;
+    if (s === 403 || s === 401) return { msg: "השרת של data.gov.il חסם את הבקשה", detail: `HTTP ${s}` };
+    if (s === 429)              return { msg: "יותר מדי בקשות — המתן רגע ונסה שוב", detail: "HTTP 429" };
+    if (s === 404)              return { msg: "מאגר הנתונים לא נמצא — ייתכן שהמזהה השתנה", detail: `HTTP 404 (resource_id)` };
+    if (s >= 500)               return { msg: "תקלה בשרת data.gov.il — נסה שוב מאוחר יותר", detail: `HTTP ${s}` };
+    return { msg: `השרת החזיר שגיאה (${s})`, detail: `HTTP ${s}` };
+  }
+
+  if (err instanceof ParseError) {
+    return {
+      msg: "השרת החזיר תשובה לא תקינה (ככל הנראה דף חסימה ולא נתונים)",
+      detail: `response is not JSON — ${err.message}`,
+    };
+  }
+
+  if (err instanceof NetworkError) {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      return { msg: "אין חיבור לאינטרנט", detail: "navigator.onLine = false" };
+    }
+    const reachable = await probeReachable();
+    if (reachable) {
+      return {
+        msg: "החיבור תקין, אך הדפדפן חסם את התשובה מ-data.gov.il (CORS)",
+        detail: `fetch rejected but host is reachable — CORS headers missing or request blocked upstream (${err.message})`,
+      };
+    }
+    return {
+      msg: "לא ניתן להגיע ל-data.gov.il — בדוק חיבור, VPN או חוסם פרסומות",
+      detail: `fetch rejected, host unreachable (${err.message})`,
+    };
+  }
+
+  return { msg: "שגיאה לא צפויה", detail: `${err && err.name || "Error"}: ${err && err.message || err}` };
 }
 
 // True if a record field carries a usable filter value (0 counts as valid).
@@ -238,7 +359,12 @@ async function fetchWltpRecord(reg) {
       const recs = await apiGet(RES_WLTP, filters, 1);
       if (recs.length) return { rec: recs[0], exact: "degem_cd" in filters };
     } catch (e) {
-      // network/parse failure on one attempt — fall through to a looser filter
+      // A rejected filter (the dataset lacks the column, or the value is the
+      // wrong type) is expected here — that is what the looser attempts are
+      // for. A comms failure is not: retrying it just stalls the search and
+      // would end up reported as "no data for this model", so surface it.
+      if (e instanceof HttpError && e.status < 500) continue;
+      throw e;
     }
   }
   return { rec: null, exact: false };
@@ -313,6 +439,14 @@ function setStatus(msg, color) {
   el.style.color = color || "#94a3b8";
 }
 
+// Technical one-liner shown under a failure message. Keeps the cause visible
+// to whoever has to fix it without needing the browser console.
+function setErrorDetail(text) {
+  const el = document.getElementById("errorDetail");
+  el.textContent = text || "";
+  el.style.display = text ? "block" : "none";
+}
+
 function hide(...ids) { ids.forEach(id => { document.getElementById(id).style.display = "none"; }); }
 function show(id, display = "block") { document.getElementById(id).style.display = display; }
 
@@ -325,6 +459,7 @@ async function doSearch() {
   btn.disabled = true;
   btn.textContent = "מחפש...";
   setStatus("מחפש...", "#94a3b8");
+  setErrorDetail("");
   hide("warningBox", "resultCard", "batteryCard");
 
   try {
@@ -399,7 +534,10 @@ async function doSearch() {
     showBattery(sug_delek_nm);
 
   } catch (e) {
-    setStatus("שגיאת תקשורת — בדוק חיבור לאינטרנט", "red");
+    console.error("[car-check] search failed:", e);
+    const { msg, detail } = await describeFailure(e);
+    setStatus(msg, "red");
+    setErrorDetail(detail);
   } finally {
     btn.disabled = false;
     btn.textContent = "חפש";
