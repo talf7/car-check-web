@@ -181,7 +181,16 @@
 <div class="battery-card" id="batteryCard"></div>
 
 <script>
-const API      = "https://data.gov.il/api/3/action/datastore_search";
+// data.gov.il serves this dataset fine to a direct request — opening the API URL
+// in a tab returns the records — but refuses it to this page: the answer comes
+// back without an Access-Control-Allow-Origin header, so the browser discards it
+// before the code sees anything. No change in this file can bypass that; the
+// request has to be made by something that is not a browser. Point PROXY_BASE at
+// a deployed proxy (see proxy/README.md) to route through one. Empty means talk
+// to data.gov.il directly, which works wherever the origin is not blocked.
+const PROXY_BASE = "";
+const API      = PROXY_BASE || "https://data.gov.il/api/3/action/datastore_search";
+const API_HOST = new URL(API).host;
 const RES_REG  = "053cea08-09bc-40ec-8f7a-156f0677aff3";
 const RES_WLTP = "142afde2-6228-49f9-8a29-9b6c3a0cbe40";
 
@@ -266,9 +275,25 @@ function apiGetJsonp(resourceId, filters, limit = 1) {
     }
     const timer = setTimeout(() => { cleanup(); reject(new TimeoutError()); }, TIMEOUT_MS);
 
+    let answered = false;
     window[cb] = (data) => {
+      answered = true;
       cleanup();
       resolve(((data || {}).result || {}).records || []);
+    };
+
+    // The script loaded but never called back, which means the API ignored the
+    // callback parameter and answered with plain JSON — not runnable JavaScript.
+    // Caught here so an unsupported JSONP costs nothing instead of sitting until
+    // the timeout expires.
+    script.onload = () => {
+      if (answered) return;
+      cleanup();
+      const err = new NetworkError(new Error("JSONP unsupported — callback was ignored"));
+      // The host answered fine, it just does not speak JSONP. That says nothing
+      // about the data being available, so it must not be read as a fault there.
+      err.jsonpUnsupported = true;
+      reject(err);
     };
     // Fires when the host refuses the request or answers with something that is
     // not runnable JavaScript — a block page, for instance.
@@ -301,6 +326,7 @@ async function apiGet(resourceId, filters, limit = 1) {
       // Neither transport got data. That is no longer a CORS story — CORS does
       // not touch a script tag — so mark it and let the caller say so.
       e.jsonpFailed = true;
+      e.jsonpUnsupported = jsonpErr.jsonpUnsupported === true;
       throw e;
     }
   }
@@ -324,15 +350,15 @@ async function probeReachable() {
 // it, so a report says what actually broke instead of "communication error".
 async function describeFailure(err) {
   if (err instanceof TimeoutError) {
-    return { msg: "data.gov.il לא הגיב בזמן — נסה שוב", detail: `timeout ${TIMEOUT_MS}ms` };
+    return { msg: `${API_HOST} לא הגיב בזמן — נסה שוב`, detail: `timeout ${TIMEOUT_MS}ms` };
   }
 
   if (err instanceof HttpError) {
     const s = err.status;
-    if (s === 403 || s === 401) return { msg: "השרת של data.gov.il חסם את הבקשה", detail: `HTTP ${s}` };
+    if (s === 403 || s === 401) return { msg: `השרת של ${API_HOST} חסם את הבקשה`, detail: `HTTP ${s}` };
     if (s === 429)              return { msg: "יותר מדי בקשות — המתן רגע ונסה שוב", detail: "HTTP 429" };
     if (s === 404)              return { msg: "מאגר הנתונים לא נמצא — ייתכן שהמזהה השתנה", detail: `HTTP 404 (resource_id)` };
-    if (s >= 500)               return { msg: "תקלה בשרת data.gov.il — נסה שוב מאוחר יותר", detail: `HTTP ${s}` };
+    if (s >= 500)               return { msg: `תקלה בשרת ${API_HOST} — נסה שוב מאוחר יותר`, detail: `HTTP ${s}` };
     return { msg: `השרת החזיר שגיאה (${s})`, detail: `HTTP ${s}` };
   }
 
@@ -348,23 +374,32 @@ async function describeFailure(err) {
       return { msg: "אין חיבור לאינטרנט", detail: "navigator.onLine = false" };
     }
     const reachable = await probeReachable();
+    if (reachable && err.jsonpUnsupported) {
+      // The fetch was discarded for a missing CORS header and JSONP is not
+      // offered as a way around it. The data itself is fine — the same URL in a
+      // browser tab returns it — so only a non-browser request can reach it.
+      return {
+        msg: `${API_HOST} לא מרשה לדף הזה לקרוא את התשובה — נדרש שרת ביניים`,
+        detail: "fetch blocked by CORS and JSONP unsupported — see proxy/README.md",
+      };
+    }
     if (reachable && err.jsonpFailed) {
       // The host answered, but neither a fetch nor a script tag got usable data
       // out of it. A missing CORS header cannot explain that — a script tag
       // ignores CORS — so the API itself is refusing or failing.
       return {
-        msg: "data.gov.il מגיב אך לא מחזיר נתונים — כנראה תקלה או חסימה אצלם",
+        msg: `${API_HOST} מגיב אך לא מחזיר נתונים — כנראה תקלה או חסימה אצלם`,
         detail: `host reachable, both fetch and JSONP failed — API not serving data (${err.message})`,
       };
     }
     if (reachable) {
       return {
-        msg: "החיבור תקין, אך הדפדפן חסם את התשובה מ-data.gov.il (CORS)",
+        msg: `החיבור תקין, אך הדפדפן חסם את התשובה מ-${API_HOST} (CORS)`,
         detail: `fetch rejected but host is reachable — CORS headers missing or request blocked upstream (${err.message})`,
       };
     }
     return {
-      msg: "לא ניתן להגיע ל-data.gov.il — בדוק חיבור, VPN או חוסם פרסומות",
+      msg: `לא ניתן להגיע ל-${API_HOST} — בדוק חיבור, VPN או חוסם פרסומות`,
       detail: `fetch rejected, host unreachable (${err.message})`,
     };
   }
